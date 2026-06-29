@@ -1,0 +1,85 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.spatial import Delaunay
+from google.colab import files
+
+
+print("Пожалуйста, выберите и загрузите файл с изображением документа:")
+uploaded = files.upload()
+image_path = list(uploaded.keys())[0]
+
+
+img = cv2.imread(image_path)
+gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+_, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+# буквы или слова
+num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh)
+
+# Фильтруем слишком мелкий шум и слишком большие объекты (например, рамки)
+points = []
+min_area, max_area = 20, 2000  # Настройки под размер шрифта
+for i in range(1, num_labels): # Пропускаем фон (индекс 0)
+    if min_area < stats[i, cv2.CC_STAT_AREA] < max_area:
+        points.append(centroids[i])
+
+points = np.array(points)
+print(f"Обнаружено подходящих текстовых точек: {len(points)}")
+
+# Защита: алгоритму нужно хотя бы 4 точки для триангуляции и поиска смежности
+if len(points) < 4:
+    raise ValueError("Найдено слишком мало точек. Попробуйте другое фото или измените min_area/max_area.")
+
+# --- Шаг 3: Функция вычисления дескрипторов DETRIF ---
+def compute_detrif_descriptors(points):
+    tri = Delaunay(points)
+    simplices = tri.simplices
+    neighbors = tri.neighbors
+    descriptors = []
+
+    for i, simplex in enumerate(simplices):
+        p = points[simplex]
+        s0 = np.linalg.norm(p[0] - p[1])
+        s1 = np.linalg.norm(p[1] - p[2])
+        s2 = np.linalg.norm(p[2] - p[0])
+        sides = sorted([s0, s1, s2])
+
+        r1 = sides[0] / sides[2] if sides[2] > 0 else 0
+        r2 = sides[1] / sides[2] if sides[2] > 0 else 0
+
+        for nb in neighbors[i]:
+            if nb != -1:
+                nb_simplex = simplices[nb]
+                nb_p = points[nb_simplex]
+                nb_s0 = np.linalg.norm(nb_p[0] - nb_p[1])
+                nb_s1 = np.linalg.norm(nb_p[1] - nb_p[2])
+                nb_s2 = np.linalg.norm(nb_p[2] - nb_p[0])
+                nb_sides = sorted([nb_s0, nb_s1, nb_s2])
+
+                nbr1 = nb_sides[0] / nb_sides[2] if nb_sides[2] > 0 else 0
+                nbr2 = nb_sides[1] / nb_sides[2] if nb_sides[2] > 0 else 0
+
+                feature_pair = tuple(sorted([(r1, r2), (nbr1, nbr2)]))
+                detrif_vector = (feature_pair[0][0], feature_pair[0][1], feature_pair[1][0], feature_pair[1][1])
+                descriptors.append(detrif_vector)
+                break
+
+    return np.array(descriptors), tri
+
+# Вычисляем дескрипторы
+descriptors, tri = compute_detrif_descriptors(points)
+print(f"Успешно сгенерировано дескрипторов DETRIF: {len(descriptors)}")
+print("Пример первого вектора признаков:", descriptors[0])
+
+# --- Шаг 4: Визуализация построенной сетки Делоне на фото ---
+plt.figure(figsize=(10, 10))
+plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+# Рисуем треугольники
+plt.triplot(points[:,0], points[:,1], tri.simplices, color='red', alpha=0.6, linewidth=1)
+# Рисуем центроиды
+plt.scatter(points[:,0], points[:,1], color='blue', s=10, zorder=5)
+plt.title("Сетка триангуляции Делоне на основе текста документа")
+plt.axis('off')
+plt.show()
